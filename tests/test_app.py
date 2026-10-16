@@ -33,6 +33,8 @@ class FakeStreamlit:
         self.button_values = {}
         self.form_values = {}
         self.text_values = {}
+        self.widget_state = {}
+        self.text_input_results = []
         self.messages = []
         self.rerun = Mock()
 
@@ -64,9 +66,11 @@ class FakeStreamlit:
         self.messages.append(("code", value))
 
     def text_input(self, label, value="", key=None, **kwargs):
-        if label in self.text_values:
-            return self.text_values[label]
-        return value
+        if key not in self.widget_state:
+            self.widget_state[key] = self.text_values.get(label, value)
+        result = self.widget_state[key]
+        self.text_input_results.append((key, result))
+        return result
 
     def columns(self, count):
         return [FakeColumn(self) for _ in range(count)]
@@ -168,6 +172,34 @@ class AppRendererTests(unittest.TestCase):
             "Why is MD5 used?": "Legacy fixture only.",
             "Does this affect existing users?": "No, migration is included.",
         })
+
+    def test_widget_inputs_are_isolated_by_session_and_question(self):
+        approval = {
+            "confidence": 0.65, "confidence_reasoning": "Review needed.",
+            "summary": "Update.", "comments": [], "diff_preview": "diff",
+        }
+        app.render_approval_card(approval, thread_id="session-a")
+        approval_key_a, _ = self.fake_st.text_input_results[-1]
+        self.fake_st.widget_state[approval_key_a] = "stale feedback"
+        app.render_approval_card(approval, thread_id="session-b")
+        approval_key_b, approval_value_b = self.fake_st.text_input_results[-1]
+
+        self.assertNotEqual(approval_key_a, approval_key_b)
+        self.assertEqual(approval_value_b, "")
+
+        escalation = {
+            "confidence": 0.4, "confidence_reasoning": "Need context.",
+            "summary": "Changes auth.", "questions": ["Why is this needed?"],
+        }
+        app.render_escalation_card(escalation, thread_id="session-a")
+        question_key_a, _ = self.fake_st.text_input_results[-1]
+        self.fake_st.widget_state[question_key_a] = "answer for old question"
+        changed_question = {**escalation, "questions": ["Which users are affected?"]}
+        app.render_escalation_card(changed_question, thread_id="session-a")
+        question_key_changed, changed_value = self.fake_st.text_input_results[-1]
+
+        self.assertNotEqual(question_key_a, question_key_changed)
+        self.assertEqual(changed_value, "")
 
     def test_recent_session_selection_restores_interrupt_or_final_state(self):
         session = {"thread_id": THREAD_ID, "pr_url": PR_URL, "worst_risk": "high", "last_event": "now"}

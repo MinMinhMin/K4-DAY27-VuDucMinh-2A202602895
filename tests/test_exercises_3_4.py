@@ -140,6 +140,70 @@ class Exercise3Tests(TestCase):
 
 
 class Exercise4Tests(IsolatedAsyncioTestCase):
+    async def test_analyzer_requests_context_questions_below_shared_threshold(self):
+        result_analysis = analysis(0.4, ["Why MD5 in auth.py?"])
+        llm = Mock()
+        structured_llm = Mock()
+        structured_llm.ainvoke = AsyncMock(return_value=result_analysis)
+        llm.with_structured_output.return_value = structured_llm
+
+        with (
+            patch.object(exercise_4, "get_llm", return_value=llm),
+            patch.object(exercise_4, "audit", AsyncMock()),
+        ):
+            await exercise_4.node_analyze(graph_input())
+
+        system_prompt = structured_llm.ainvoke.call_args.args[0][0]["content"]
+        self.assertIn("0.58", system_prompt)
+        self.assertIn("2–4", system_prompt)
+        self.assertIn("file", system_prompt.lower())
+
+    async def test_thread_helper_resumes_saved_interrupt(self):
+        payload = {"kind": "approval_request", "confidence": 0.65}
+        snapshot = SimpleNamespace(
+            values={"pr_url": PR_URL},
+            tasks=(SimpleNamespace(interrupts=(SimpleNamespace(value=payload),)),),
+            next=("human_approval",),
+        )
+        graph = Mock()
+        graph.aget_state = AsyncMock(return_value=snapshot)
+        graph.ainvoke = AsyncMock(return_value={"final_action": "committed"})
+        cfg = {"configurable": {"thread_id": THREAD_ID}}
+        answer = {"choice": "approve", "feedback": "looks good"}
+
+        with patch.object(exercise_4, "handle_interrupt", return_value=answer):
+            result = await exercise_4.invoke_or_resume(graph, PR_URL, THREAD_ID, cfg)
+
+        graph.ainvoke.assert_awaited_once_with(Command(resume=answer), cfg)
+        self.assertEqual(result, {"final_action": "committed"})
+
+    async def test_thread_helper_does_not_restart_completed_session(self):
+        final_state = {"pr_url": PR_URL, "final_action": "rejected"}
+        snapshot = SimpleNamespace(values=final_state, tasks=(), next=())
+        graph = Mock()
+        graph.aget_state = AsyncMock(return_value=snapshot)
+        graph.ainvoke = AsyncMock()
+        cfg = {"configurable": {"thread_id": THREAD_ID}}
+
+        result = await exercise_4.invoke_or_resume(graph, PR_URL, THREAD_ID, cfg)
+
+        graph.ainvoke.assert_not_awaited()
+        self.assertEqual(result, final_state)
+
+    async def test_thread_helper_starts_when_checkpoint_is_empty(self):
+        snapshot = SimpleNamespace(values={}, tasks=(), next=())
+        graph = Mock()
+        graph.aget_state = AsyncMock(return_value=snapshot)
+        graph.ainvoke = AsyncMock(return_value={"final_action": "auto_committed"})
+        cfg = {"configurable": {"thread_id": THREAD_ID}}
+
+        result = await exercise_4.invoke_or_resume(graph, PR_URL, THREAD_ID, cfg)
+
+        graph.ainvoke.assert_awaited_once_with(
+            {"pr_url": PR_URL, "thread_id": THREAD_ID}, cfg
+        )
+        self.assertEqual(result, {"final_action": "auto_committed"})
+
     async def test_audit_persists_structured_event_with_session_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database = str(Path(temp_dir) / "audit.db")

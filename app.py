@@ -8,6 +8,7 @@ Run with::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 
 import streamlit as st
@@ -125,7 +126,7 @@ def render_recent_sessions() -> None:
             st.rerun()
 
 
-def render_approval_card(payload: dict) -> dict | None:
+def render_approval_card(payload: dict, thread_id: str | None = None) -> dict | None:
     """Render an approval interrupt and return its exact resume value."""
     confidence = payload["confidence"]
     st.subheader(f"Approval requested — confidence {confidence:.0%}")
@@ -141,7 +142,10 @@ def render_approval_card(payload: dict) -> dict | None:
     with st.expander("Diff"):
         st.code(payload.get("diff_preview", ""), language="diff")
 
-    feedback = st.text_input("Feedback (optional)", key="approval_feedback")
+    session_id = thread_id or payload.get("thread_id") or payload.get("pr_url") or "current"
+    feedback = st.text_input(
+        "Feedback (optional)", key=f"approval_feedback_{session_id}"
+    )
     approve, reject, edit = st.columns(3)
     if approve.button("Approve", type="primary"):
         return {"choice": "approve", "feedback": feedback}
@@ -152,7 +156,9 @@ def render_approval_card(payload: dict) -> dict | None:
     return None
 
 
-def render_escalation_card(payload: dict) -> dict[str, str] | None:
+def render_escalation_card(
+    payload: dict, thread_id: str | None = None
+) -> dict[str, str] | None:
     """Render context questions and return a question-to-answer mapping."""
     confidence = payload["confidence"]
     st.subheader(f"Strong escalation — confidence {confidence:.0%}")
@@ -161,9 +167,16 @@ def render_escalation_card(payload: dict) -> dict[str, str] | None:
         st.error("Risks: " + ", ".join(payload["risk_factors"]))
     st.markdown(payload["summary"])
 
-    with st.form("escalation"):
+    session_id = thread_id or payload.get("thread_id") or payload.get("pr_url") or "current"
+    with st.form(f"escalation_{session_id}"):
         answers = {
-            question: st.text_input(question, key=f"escalation_answer_{index}")
+            question: st.text_input(
+                question,
+                key=(
+                    f"escalation_answer_{session_id}_{index}_"
+                    f"{hashlib.sha256(question.encode()).hexdigest()[:12]}"
+                ),
+            )
             for index, question in enumerate(payload["questions"])
         }
         submitted = st.form_submit_button("Submit answers")
@@ -237,9 +250,9 @@ def main() -> None:
     payload = st.session_state["interrupt_payload"]
     if payload is not None:
         if payload["kind"] == "approval_request":
-            answer = render_approval_card(payload)
+            answer = render_approval_card(payload, st.session_state["thread_id"])
         elif payload["kind"] == "escalation":
-            answer = render_escalation_card(payload)
+            answer = render_escalation_card(payload, st.session_state["thread_id"])
         else:
             st.error(f"Unknown review interrupt: {payload['kind']}")
             answer = None

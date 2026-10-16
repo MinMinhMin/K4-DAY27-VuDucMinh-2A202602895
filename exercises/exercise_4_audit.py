@@ -106,7 +106,13 @@ async def node_analyze(state):
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         a: PRAnalysis = await llm.ainvoke([
-            {"role": "system", "content": "Senior reviewer. Structured output."},
+            {"role": "system", "content": (
+                "You are a senior software engineer reviewing a pull request for correctness, "
+                "security, and compatibility. Return a complete structured review. If your "
+                f"confidence is below {ESCALATE_THRESHOLD:.2f}, populate escalation_questions "
+                "with 2–4 specific, context-rich questions that cite relevant files or sections "
+                "in the diff and ask for information needed to make a reliable review."
+            )},
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
     console.print(f"  [green]✓[/green] confidence={a.confidence:.0%}, {len(a.comments)} comment(s)")
@@ -379,6 +385,31 @@ def handle_interrupt(payload):
     return {q: console.input(f"Q: {q}\nA: ").strip() for q in payload["questions"]}
 
 
+async def invoke_or_resume(app, pr_url: str, thread_id: str, cfg: dict):
+    """Start a new thread, resume its saved interrupt, or return a completed state."""
+    snapshot = await app.aget_state(cfg)
+    pending = [
+        interrupted
+        for task in getattr(snapshot, "tasks", ())
+        for interrupted in getattr(task, "interrupts", ())
+    ]
+
+    if pending:
+        graph_input = Command(resume=handle_interrupt(pending[0].value))
+    elif getattr(snapshot, "values", None):
+        if not getattr(snapshot, "next", ()):
+            return dict(snapshot.values)
+        graph_input = None
+    else:
+        graph_input = {"pr_url": pr_url, "thread_id": thread_id}
+
+    result = await app.ainvoke(graph_input, cfg)
+    while "__interrupt__" in result:
+        payload = result["__interrupt__"][0].value
+        result = await app.ainvoke(Command(resume=handle_interrupt(payload)), cfg)
+    return result
+
+
 async def run(pr_url: str, thread_id: str | None):
     thread_id = thread_id or str(uuid.uuid4())
     console.rule("[bold]Exercise 4 — SQLite audit trail[/bold]")
@@ -390,10 +421,7 @@ async def run(pr_url: str, thread_id: str | None):
         app = build_graph(cp)
         cfg = {"configurable": {"thread_id": thread_id}}
 
-        result = await app.ainvoke({"pr_url": pr_url, "thread_id": thread_id}, cfg)
-        while "__interrupt__" in result:
-            payload = result["__interrupt__"][0].value
-            result = await app.ainvoke(Command(resume=handle_interrupt(payload)), cfg)
+        result = await invoke_or_resume(app, pr_url, thread_id, cfg)
 
         console.rule("Final")
         console.print(f"final_action = {result.get('final_action')}")
